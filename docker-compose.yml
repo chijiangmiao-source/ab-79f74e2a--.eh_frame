@@ -1,0 +1,29 @@
+services:
+  web:
+    build: .
+    image: ehframe-unwind:latest
+    environment:
+      PORT: "8080"
+    ports:
+      # 宿主端口可配置：HOST_PORT=9090 docker compose up
+      - "${HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import json,urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3); sys.exit(0 if r.status==200 and json.load(r)['status']=='ok' else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # 验收服务：代码测试 + 构建检查 + 有效/失败输入的 API/HTTP 冒烟，
+  # 完成后退出，退出码即验收结果（0 通过，非 0 失败）。
+  verify:
+    build: .
+    image: ehframe-unwind:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      TARGET_URL: "http://web:8080"
+    command: ["python3", "scripts/verify.py"]
+    restart: "no"

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>.eh_frame FDE 命中与寄存器恢复</title>
+<style>
+  :root { --bg:#0f1419; --panel:#171d24; --line:#2a333e; --fg:#d7dde5;
+          --muted:#8b98a8; --accent:#5eb3ff; --ok:#4cc38a; --bad:#ff6b6b;
+          --warn:#f0b24f; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",monospace;
+         background:var(--bg); color:var(--fg); }
+  header { padding:14px 22px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-size:16px; margin:0; }
+  header span { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns:minmax(360px,460px) 1fr; gap:16px; padding:16px 22px; }
+  @media (max-width:980px){ main{grid-template-columns:1fr;} }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .panel h2 { font-size:13px; margin:0 0 10px; color:var(--muted);
+              text-transform:uppercase; letter-spacing:.08em; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  textarea, input { width:100%; background:#0c1116; color:var(--fg);
+      border:1px solid var(--line); border-radius:5px; padding:7px 9px; font:inherit; }
+  textarea { min-height:150px; resize:vertical; word-break:break-all; }
+  .reggrid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .reggrid label { margin:0; }
+  .reggrid input { padding:5px 7px; font-size:12px; }
+  .memrow { display:grid; grid-template-columns:170px 1fr; gap:8px; }
+  button { margin-top:12px; width:100%; padding:9px; border:0; border-radius:6px;
+           background:var(--accent); color:#07131f; font-weight:600; cursor:pointer; font:inherit; }
+  button:hover { filter:brightness(1.1); }
+  .alert { border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:13px;
+           border:1px solid; white-space:pre-wrap; word-break:break-all; }
+  .alert.miss { border-color:var(--warn); color:var(--warn); background:rgba(240,178,79,.08); }
+  .alert.err  { border-color:var(--bad); color:var(--bad); background:rgba(255,107,107,.08); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .kv { display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:13px; }
+  .kv dt { color:var(--muted); } .kv dd { margin:0; word-break:break-all; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .badge.hit { background:rgba(76,195,138,.15); color:var(--ok); border:1px solid var(--ok); }
+  .badge.miss { background:rgba(240,178,79,.15); color:var(--warn); border:1px solid var(--warn); }
+  .tag-offset { color:var(--accent); font-size:11px; }
+  .rule-und { color:var(--bad); }
+  .rule-same { color:var(--warn); }
+  .muted { color:var(--muted); }
+  .src { font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>飞控固件异常 · <code>.eh_frame</code> FDE 命中与寄存器恢复</h1>
+  <span>x86-64 · CIE v1 · 绝对 udata4 FDE 指针 · 原始节 ≤ 192 KiB</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>输入</h2>
+    <label for="frame">Base64 小端 ELF64 <code>.eh_frame</code> 原始节</label>
+    <textarea id="frame" placeholder="粘贴 Base64…"></textarea>
+    <div class="src" id="sizeinfo"></div>
+
+    <label for="pc">当前 PC（hex 需 0x 前缀）</label>
+    <input id="pc" placeholder="0x401020">
+
+    <label>当前寄存器值（用于计算 CFA / 同值 / register 规则；可留空）</label>
+    <div class="reggrid" id="reggrid"></div>
+
+    <label>内存转储（CFA 偏移取值需要；可选）</label>
+    <div class="memrow">
+      <input id="membase" placeholder="基址，如 0x7ffdeadbe000">
+      <input id="memdata" placeholder="Base64 内存字节">
+    </div>
+    <button id="go">解栈</button>
+  </section>
+
+  <section class="panel" id="out">
+    <h2>结论</h2>
+    <p class="muted">提交输入后在此显示命中的 FDE、关联 CIE、命中范围、CFA、调用者 PC 及各寄存器恢复规则。</p>
+  </section>
+</main>
+
+<script>
+const REGS = ["rax","rdx","rcx","rbx","rsi","rdi","rbp","rsp",
+              "r8","r9","r10","r11","r12","r13","r14","r15"];
+const grid = document.getElementById("reggrid");
+REGS.forEach(r => {
+  const w = document.createElement("label");
+  w.innerHTML = r.toUpperCase() + '<input data-reg="'+r+'" placeholder="-">';
+  grid.appendChild(w);
+});
+
+const hex = v => {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") return v.startsWith("0x") ? v : "0x" + BigInt(v).toString(16);
+  return "0x" + BigInt(v).toString(16);
+};
+const esc = s => String(s).replace(/[&<>]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const offTag = o => o === null || o === undefined ? "" :
+  ' <span class="tag-offset">@原始偏移 0x'+Number(o).toString(16)+'</span>';
+
+function renderMiss(r) {
+  let fdes = "";
+  if (r.fdes && r.fdes.length) {
+    fdes = '<table><thead><tr><th>#</th><th>范围起</th><th>范围止</th><th class="num">长度</th><th class="num">偏移</th></tr></thead><tbody>' +
+      r.fdes.map(f => '<tr><td>'+f.index+'</td><td>'+hex(f.initial_location)+
+      '</td><td>'+hex(f.range_end)+'</td><td class="num">0x'+Number(f.address_range).toString(16)+
+      '</td><td class="num">0x'+Number(f.raw_offset).toString(16)+'</td></tr>').join("") +
+      '</tbody></table>';
+  }
+  document.getElementById("out").innerHTML =
+    '<h2>结论</h2><div class="alert miss">未命中：'+esc(r.message || "PC 未落入任何 FDE")+
+    '（PC='+esc(document.getElementById("pc").value)+'）。上次成功结论已清除。</div>' + fdes;
+}
+
+function renderError(r) {
+  const o = r.raw_offset === null || r.raw_offset === undefined ? "（非节内偏移）" :
+    "0x" + Number(r.raw_offset).toString(16);
+  document.getElementById("out").innerHTML =
+    '<h2>结论</h2><div class="alert err">'+esc(r.error)+
+    '\n首个原始偏移：'+esc(o)+'\n未返回任何部分寄存器结果。</div>';
+}
+
+function ruleClass(rule) {
+  if (!rule) return "rule-und";
+  return rule.kind === "undefined" ? "rule-und"
+       : rule.kind === "same_value" ? "rule-same" : "";
+}
+
+function renderHit(r) {
+  const rows = r.registers.map(g => '<tr>' +
+    '<td>'+g.name+'</td>' +
+    '<td class="'+ruleClass(g.rule)+'">'+esc(g.rule ? g.rule.text : "未定义")+
+      offTag(g.rule_raw_offset)+'</td>' +
+    '<td class="num">'+(g.value === null ? '<span class="muted">未定义</span>' : hex(g.value))+'</td>' +
+    '<td>'+(g.recovered ? '<span class="badge hit">已恢复</span>' :
+            (g.rule && g.rule.kind === "same_value" ? "同值（当前值）" :
+             g.rule && g.rule.kind === "undefined" ? "未定义" : "—"))+'</td></tr>').join("");
+  document.getElementById("out").innerHTML =
+    '<h2>结论 <span class="badge hit">命中 FDE #'+r.fde.index+'</span></h2>' +
+    '<dl class="kv">' +
+      '<dt>当前 PC</dt><dd>'+hex(r.pc)+'</dd>' +
+      '<dt>FDE</dt><dd>#'+r.fde.index+'，原始偏移 0x'+Number(r.fde.raw_offset).toString(16)+
+        ' – 0x'+Number(r.fde.end_offset).toString(16)+'</dd>' +
+      '<dt>关联 CIE</dt><dd>原始偏移 0x'+Number(r.cie.raw_offset).toString(16)+
+        '，v'+r.cie.version+'，增强 "'+esc(r.cie.augmentation)+
+        '"，code_align='+r.cie.code_alignment+'，data_align='+r.cie.data_alignment+
+        '，RA 寄存器='+r.cie.return_address_register+'</dd>' +
+      '<dt>命中范围</dt><dd>['+hex(r.fde.initial_location)+', '+hex(r.fde.range_end)+
+        ')，长度 0x'+Number(r.fde.address_range).toString(16)+'</dd>' +
+      '<dt>CFA</dt><dd>'+esc(r.cfa.rule.text)+offTag(r.cfa.rule_raw_offset)+
+        ' = <b>'+hex(r.cfa.value)+'</b></dd>' +
+      '<dt>调用者 PC (RA)</dt><dd><b>'+hex(r.return_address.value)+'</b>'+
+        ' <span class="muted">规则：'+esc(r.return_address.rule.text)+'</span>'+
+        offTag(r.return_address.rule_raw_offset)+'</dd>' +
+    '</dl>' +
+    '<h2 style="margin-top:14px">寄存器恢复规则与取值</h2>' +
+    '<table><thead><tr><th>寄存器</th><th>恢复规则</th><th class="num">取值</th><th>状态</th></tr></thead>' +
+    '<tbody>'+rows+'</tbody></table>';
+}
+
+document.getElementById("go").addEventListener("click", async () => {
+  const registers = {};
+  document.querySelectorAll("#reggrid input").forEach(i => {
+    if (i.value.trim()) registers[i.dataset.reg.toUpperCase()] = i.value.trim();
+  });
+  const payload = {
+    eh_frame: document.getElementById("frame").value,
+    pc: document.getElementById("pc").value.trim(),
+    registers,
+  };
+  const mb = document.getElementById("membase").value.trim();
+  const md = document.getElementById("memdata").value.trim();
+  if (mb || md) payload.memory = { base: mb, data: md };
+
+  const out = document.getElementById("out");
+  out.innerHTML = '<h2>结论</h2><p class="muted">解析与归约中…</p>';
+  try {
+    const resp = await fetch("/api/unwind", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)});
+    const r = await resp.json();
+    if (resp.ok && r.hit) renderHit(r);
+    else if (resp.ok && r.hit === false) renderMiss(r);
+    else renderError(r);
+  } catch (e) {
+    renderError({error: "请求失败：" + e, raw_offset: null});
+  }
+});
+
+document.getElementById("frame").addEventListener("input", e => {
+  const len = e.target.value.replace(/\s+/g, "").length;
+  const approx = Math.floor(len / 4) * 3;
+  document.getElementById("sizeinfo").textContent =
+    "Base64 字符 " + len + "，解码后约 " + approx + " 字节（上限 196608）";
+});
+</script>
+</body>
+</html>
