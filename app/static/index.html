@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x86-64 .eh_frame 值班分析台</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#171e2e; --panel2:#1d2740; --line:#2b3856;
+    --text:#e6ecf7; --muted:#93a0bd; --accent:#5aa9ff; --ok:#3ddc84;
+    --warn:#ffb454; --err:#ff6b6b; --mono:ui-monospace,SFMono-Regular,
+    Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.55 -apple-system,"Segoe UI",Roboto,"PingFang SC",
+    "Microsoft YaHei",sans-serif}
+  header{padding:16px 24px;border-bottom:1px solid var(--line);
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0}
+  header .sub{color:var(--muted);font-size:12px}
+  main{display:grid;grid-template-columns:minmax(360px,5fr) minmax(360px,7fr);
+    gap:16px;padding:16px 24px;align-items:start}
+  @media (max-width:980px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:14px 16px;margin-bottom:16px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--accent);
+    text-transform:uppercase;letter-spacing:.06em}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 4px}
+  textarea,input[type=text]{width:100%;background:#0c111c;color:var(--text);
+    border:1px solid var(--line);border-radius:7px;padding:8px 10px;
+    font-family:var(--mono);font-size:12.5px}
+  textarea{min-height:120px;resize:vertical;white-space:pre;
+    overflow-wrap:normal;overflow:auto}
+  textarea#section{min-height:150px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:150px}
+  button{background:var(--accent);color:#081322;border:0;border-radius:7px;
+    padding:9px 18px;font-weight:600;cursor:pointer;margin-top:12px}
+  button.secondary{background:var(--panel2);color:var(--text);
+    border:1px solid var(--line)}
+  button:hover{filter:brightness(1.08)}
+  .hint{color:var(--muted);font-size:11.5px;margin-top:4px}
+  .status{border-radius:8px;padding:10px 12px;margin-bottom:14px;
+    font-weight:600;display:none}
+  .status.show{display:block}
+  .status.ok{background:rgba(61,220,132,.12);border:1px solid var(--ok);
+    color:var(--ok)}
+  .status.miss{background:rgba(255,180,84,.12);border:1px solid var(--warn);
+    color:var(--warn)}
+  .status.err{background:rgba(255,107,107,.12);border:1px solid var(--err);
+    color:var(--err)}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);
+    font-size:12px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);
+    vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase}
+  td.num{color:var(--accent)}
+  .kv{display:grid;grid-template-columns:170px 1fr;gap:4px 12px;
+    font-family:var(--mono);font-size:12.5px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0;word-break:break-all}
+  .badge{display:inline-block;padding:1px 7px;border-radius:20px;
+    font-size:11px;font-weight:700}
+  .b-ok{background:rgba(61,220,132,.18);color:var(--ok)}
+  .b-no{background:rgba(255,107,107,.18);color:var(--err)}
+  .b-und{background:rgba(255,180,84,.18);color:var(--warn)}
+  details{margin-top:8px}
+  summary{cursor:pointer;color:var(--muted);font-size:12px}
+  .timeline-wrap{overflow-x:auto}
+  .errbox{font-family:var(--mono);white-space:pre-wrap}
+  code{background:#0c111c;border:1px solid var(--line);border-radius:4px;
+    padding:0 4px}
+  #result[hidden]{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>x86-64 <code>.eh_frame</code> 值班分析台</h1>
+  <span class="sub">Base64 小端 ELF64 .eh_frame 原始节 · 最大 192 KiB · CIE v1 · 绝对 32 位 CIE 指针</span>
+  <span class="sub" id="health">健康检查：…</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>1 · 节数据</h2>
+      <label for="section">Base64 编码的原始 .eh_frame 节</label>
+      <textarea id="section" spellcheck="false"
+        placeholder="粘贴 Base64（允许换行/空白，将被去除）"></textarea>
+      <div class="hint">解码后不得超过 192 KiB；仅接受 32 位 DWARF 记录与 CIE version 1。</div>
+    </div>
+    <div class="card">
+      <h2>2 · 当前 PC 与寄存器</h2>
+      <div class="row">
+        <div>
+          <label for="pc">当前 PC（支持 0x）</label>
+          <input type="text" id="pc" placeholder="0x401156">
+        </div>
+      </div>
+      <label for="regs">寄存器当前值（每行 <code>名字=值</code>，如 <code>rsp=0x7fff0</code>）</label>
+      <textarea id="regs" spellcheck="false" style="min-height:110px"
+>rsp=0x7ffff0
+rbp=0x7ffff0
+rbx=0x111
+r12=0x222</textarea>
+      <label for="mem">内存快照（每行 <code>地址=8字节值</code>，供 offset 恢复读取）</label>
+      <textarea id="mem" spellcheck="false" style="min-height:90px"
+>0x7ffff0=0x50000
+0x7fffe8=0x333
+0x7fffe0=0x444</textarea>
+      <div class="hint">CFA 计算或 offset 恢复若读取未提供的地址，将按越界报错且不返回任何寄存器结果。</div>
+      <button id="go">分析 / Analyze</button>
+      <button id="sample" class="secondary">载入示例（含 remember/restore）</button>
+      <button id="clear" class="secondary">清空结论</button>
+    </div>
+  </section>
+
+  <section>
+    <div id="st-ok" class="status ok"></div>
+    <div id="st-miss" class="status miss"></div>
+    <div id="st-err" class="status err"></div>
+
+    <div id="result" hidden>
+      <div class="card">
+        <h2>命中结论</h2>
+        <dl class="kv" id="kv-hit"></dl>
+      </div>
+      <div class="card">
+        <h2>关联 CIE</h2>
+        <dl class="kv" id="kv-cie"></dl>
+      </div>
+      <div class="card">
+        <h2>CFA 与调用者 PC</h2>
+        <dl class="kv" id="kv-cfa"></dl>
+      </div>
+      <div class="card">
+        <h2>寄存器恢复规则与取值</h2>
+        <table>
+          <thead><tr><th>寄存器</th><th>规则</th><th>规则来源偏移</th>
+            <th>恢复值</th><th>说明</th></tr></thead>
+          <tbody id="reg-body"></tbody>
+        </table>
+        <details>
+          <summary>内存读取记录（CFA 相对，禁止越界）</summary>
+          <table><thead><tr><th>地址</th><th>8 字节值</th></tr></thead>
+          <tbody id="mem-body"></tbody></table>
+        </details>
+      </div>
+      <div class="card">
+        <h2>逐地址规则归约时间线</h2>
+        <div class="timeline-wrap">
+        <table>
+          <thead><tr><th>FDE 相对位置</th><th>CFA</th><th>寄存器规则</th></tr></thead>
+          <tbody id="tl-body"></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="errorbox" class="card" hidden>
+      <h2>解析 / 归约失败</h2>
+      <div class="errbox" id="errtext"></div>
+      <div class="hint">已定位首个原始偏移；本次请求未返回任何部分寄存器结果。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const hex = v => v == null ? "—" : "0x" + BigInt(v).toString(16);
+
+function setStatus(kind, msg){
+  for (const k of ["ok","miss","err"]) {
+    const el = $("st-"+k); el.className = "status "+k; el.textContent="";
+  }
+  if(kind){ const el=$("st-"+kind); el.textContent=msg; el.classList.add("show"); }
+}
+function clearResult(){
+  $("result").hidden = true; $("errorbox").hidden = true;
+  setStatus(null,"");
+}
+
+function kv(dl, pairs){
+  dl.innerHTML="";
+  for(const [k,v] of pairs){
+    const dt=document.createElement("dt"); dt.textContent=k;
+    const dd=document.createElement("dd"); dd.innerHTML=v;
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+}
+
+function render(data){
+  clearResult();
+  if(!data.hit){
+    setStatus("miss","未命中：" + data.miss_reason);
+    return; // 明确未命中，且页面不保留任何上次结论
+  }
+  setStatus("ok", "命中 FDE @ raw 0x"+data.fde.length_field_offset.toString(16)+
+    "，PC "+hex(data.pc)+" ∈ ["+hex(data.hit_range[0])+", "+hex(data.hit_range[1])+")");
+
+  const f=data.fde, c=data.cie;
+  kv($("kv-hit"), [
+    ["当前 PC", hex(data.pc)],
+    ["FDE 长度字段偏移", hex(f.length_field_offset)],
+    ["CIE 指针字段偏移", hex(f.cie_pointer_field_offset)],
+    ["绝对 32 位 CIE 指针", hex(f.cie_pointer)+" → CIE @ "+hex(c.length_field_offset)],
+    ["命中范围", "["+hex(f.initial_location)+", "+hex(f.end_address)+")，range="+hex(f.address_range)],
+    ["命中行 FDE 相对位置", hex(data.matched_row.fde_relative_location)],
+    ["命中行绝对起始", hex(data.matched_row.absolute_location_start)],
+    ["FDE 指令起始偏移", hex(f.instructions_offset)],
+  ]);
+  kv($("kv-cie"), [
+    ["CIE 偏移 / 版本", hex(c.length_field_offset)+" / v"+c.version],
+    ["增强字符串", JSON.stringify(c.augmentation)],
+    ["code / data align", c.code_alignment_factor+" / "+c.data_alignment_factor],
+    ["返回地址列", c.return_address_column+" ("+c.return_address_register+")"],
+    ["CIE 初始指令偏移", hex(c.initial_instructions_offset)],
+  ]);
+  kv($("kv-cfa"), [
+    ["CFA 规则", data.cfa.rule],
+    ["CFA 取值", hex(data.cfa.value)],
+    ["CFA 推导", data.cfa.reason],
+    ["CFA 规则来源偏移", hex(data.cfa.origin_offset)],
+    ["调用者 PC", data.caller_pc==null
+        ? "<span class='badge b-und'>不可恢复</span>"
+        : hex(data.caller_pc)],
+    ["返回地址规则", data.caller_pc_rule],
+    ["调用者 PC 推导", data.caller_pc_reason],
+  ]);
+
+  const rb=$("reg-body"); rb.innerHTML="";
+  for(const r of data.registers){
+    const tr=document.createElement("tr");
+    let badge = r.rule_kind==="undefined"
+      ? "<span class='badge b-und'>undefined</span>"
+      : (r.recoverable ? "<span class='badge b-ok'>可恢复</span>"
+                       : "<span class='badge b-no'>不可恢复</span>");
+    tr.innerHTML =
+      "<td>"+r.name+"<br><span style='color:var(--muted)'>#"+r.number+"</span></td>"+
+      "<td>"+r.rule+"</td>"+
+      "<td class='num'>"+hex(r.origin_offset)+"</td>"+
+      "<td class='num'>"+(r.value==null?"—":hex(r.value))+" "+badge+"</td>"+
+      "<td>"+r.reason+"</td>";
+    rb.appendChild(tr);
+  }
+  const mb=$("mem-body"); mb.innerHTML="";
+  for(const m of data.memory_reads){
+    const tr=document.createElement("tr");
+    tr.innerHTML="<td class='num'>"+hex(m.address)+"</td><td class='num'>"+hex(m.value)+"</td>";
+    mb.appendChild(tr);
+  }
+  const tb=$("tl-body"); tb.innerHTML="";
+  data.timeline.forEach((row,i)=>{
+    const tr=document.createElement("tr");
+    const regs=(row.regs||[]).map(v=>{
+      const extra = v.kind==="offset"
+        ? " → [CFA"+(v.byte_offset>=0?"+":"")+v.byte_offset+"]"
+        : v.kind==="register" ? " → "+v.operand_register : "";
+      return "<b>"+v.register+"</b> = "+v.kind+extra;
+    }).join("<br>");
+    const hl = row.fde_relative_location===data.matched_row.fde_relative_location;
+    tr.innerHTML="<td class='num'>"+hex(row.fde_relative_location)+
+      "<br><span style='color:var(--muted)'>"+hex(row.absolute_location_start)+
+      "</span></td>"+
+      "<td>"+(row.cfa||"—")+"</td><td>"+(regs||"（仅初始规则）")+"</td>";
+    if(hl) tr.style.outline="1px solid var(--accent)";
+    tb.appendChild(tr);
+  });
+  $("result").hidden=false;
+}
+
+async function analyze(){
+  const payload={
+    section_base64:$("section").value,
+    pc:$("pc").value.trim(),
+    registers_text:$("regs").value,
+    memory_text:$("mem").value,
+  };
+  setStatus(null,"");
+  let resp;
+  try{
+    resp=await fetch("/api/analyze",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)});
+  }catch(e){
+    clearResult(); $("errorbox").hidden=false;
+    $("errtext").textContent="网络错误："+e; setStatus("err","请求失败"); return;
+  }
+  let data; try{ data=await resp.json(); }catch(e){ data={error:"非 JSON 响应"}; }
+  if(resp.ok){ render(data); return; }
+  clearResult();
+  $("errorbox").hidden=false;
+  $("errtext").textContent = data.error +
+    (data.offset!=null ? "\n首个原始偏移：0x"+data.offset.toString(16)+
+      " ("+data.offset+")" : "");
+  if(resp.status===422) setStatus("err","解析/归约被拒绝（422）");
+  else setStatus("err","请求错误（"+resp.status+"）");
+}
+
+// --- bundled example: built by /api/sample is unnecessary; embed one ---
+async function loadSample(){
+  const r = await fetch("/static_sample").catch(()=>null);
+  if(r && r.ok){ const s=await r.json();
+    $("section").value=s.section_base64; $("pc").value=s.pc;
+    $("regs").value=s.registers_text; $("mem").value=s.memory_text;
+  }
+}
+
+$("go").onclick=analyze;
+$("clear").onclick=clearResult;
+$("sample").onclick=loadSample;
+
+fetch("/healthz").then(r=>r.json()).then(j=>{
+  $("health").textContent="健康检查："+j.status;
+  $("health").style.color="var(--ok)";
+}).catch(()=>{ $("health").textContent="健康检查：不可用";
+  $("health").style.color="var(--err)"; });
+</script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eh-frame-analyzer:latest
+    container_name: eh-frame-analyzer
+    # Configurable host port: override with
+    #   EHF_HOST_PORT=9090 docker compose up -d
+    ports:
+      - "${EHF_HOST_PORT:-8080}:8080"
+    environment:
+      EHF_HOST: 0.0.0.0
+      EHF_PORT: "8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # One-shot acceptance.  It builds the same image, waits for the web
+  # service to become healthy, runs engine tests + build check +
+  # API/HTTP smoke (valid and failing inputs) against the real
+  # in-Compose HTTP interface, then exits reporting the verdict via its
+  # exit code:
+  #   docker compose run --rm verify ; echo $?
+  verify:
+    image: eh-frame-analyzer:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      EHF_SMOKE_URL: "http://web:8080"
+    depends_on:
+      web:
+        condition: service_healthy
+    command: ["python", "-m", "app.verify"]
+    profiles: ["test"]
+    restart: "no"
